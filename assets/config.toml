@@ -9,8 +9,15 @@ max = 100
 width = 1
 color = "#aaa"
 
+[station]
+radius = 1.5
+color = "red"
+
+[factory]
+
 [train]
 width = 1.5
+capacity = 50
 color = "#77f"
 
 [drawing]
@@ -28,5 +35,7 @@ train_length = 10
 train_speed = 10
 train_load_speed = 10
 text_color = "#aa7"
+text_size = 0.3
+amount_color = "black"
+amount_size = 0.5
 
-[factory]

@@ -19,3 +19,11 @@ radius = 5
     resource = "Iron Plate"
     speed = 1
 
+[[factory]]
+name = "The Hole"
+color = "#555"
+radius = 5
+    [[factory.io]]
+    type = "Input"
+    resource = "Iron Plate"
+

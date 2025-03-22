@@ -33,6 +33,7 @@ struct FovConfig {
 #[derive(Deserialize)]
 struct TrainConfig {
     width: f32,
+    capacity: f32,
     color: Rgba<f32>,
 }
 
@@ -40,7 +41,11 @@ struct TrainConfig {
 struct TestConfig {
     train_length: f32,
     train_speed: f32,
+    train_load_speed: f32,
     text_color: Rgba<f32>,
+    text_size: f32,
+    amount_size: f32,
+    amount_color: Rgba<f32>,
 }
 
 #[derive(Deserialize)]
@@ -80,7 +85,14 @@ impl Index<usize> for FactoryTypes {
 struct FactoryConfig {}
 
 #[derive(Deserialize)]
+struct StationConfig {
+    radius: f32,
+    color: Rgba<f32>,
+}
+
+#[derive(Deserialize)]
 struct Config {
+    station: StationConfig,
     background: Rgba<f32>,
     fov: FovConfig,
     track: TrackConfig,
@@ -100,7 +112,7 @@ enum Drawing {
 #[derive(Debug, Copy, Clone)]
 enum Hover {
     Nothing { pos: vec2<f32> },
-    Node { id: Id },
+    TrackNode { id: Id },
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
@@ -166,6 +178,23 @@ impl Tracks {
         let to = self.nodes.get(&to).unwrap();
         (from.pos - to.pos).len()
     }
+
+    fn pathfind(&self, from: Id, to: Id) -> Option<Vec<Id>> {
+        let to = self.nodes.get(&to).unwrap();
+        let (path, _cost) = pathfinding::directed::astar::astar(
+            &from,
+            |&v| {
+                let v = self.nodes.get(&v).unwrap();
+                v.connections.iter().copied().map(|u| {
+                    let u = self.nodes.get(&u).unwrap();
+                    (u.id, noisy_float::prelude::r32((v.pos - u.pos).len()))
+                })
+            },
+            |id| noisy_float::prelude::r32((self.nodes.get(&id).unwrap().pos - to.pos).len()),
+            |&v| v == to.id,
+        )?;
+        Some(path)
+    }
 }
 
 #[derive(Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
@@ -176,7 +205,9 @@ enum IoType {
 
 struct FactoryIo {
     ty: IoType,
+    node: Id,
     resource: Id,
+    amount: Option<f32>,
     pos: vec2<f32>,
 }
 
@@ -191,9 +222,19 @@ struct Factory {
 #[derive(HasId)]
 struct Train {
     id: Id,
+    resource: Id,
+    amount: f32,
     length: f32,
     head: TrackPoint,
     tail_nodes: VecDeque<Id>,
+    path_from_target: Option<Vec<Id>>,
+    target: Option<IoId>,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct IoId {
+    factory: Id,
+    io: usize,
 }
 
 enum Control {
@@ -209,6 +250,12 @@ enum Control {
     },
 }
 
+#[derive(HasId)]
+struct Resource {
+    id: Id,
+    name: String,
+}
+
 struct Game {
     cursor_world_position: vec2<f32>,
     id_gen: IdGen,
@@ -222,7 +269,7 @@ struct Game {
     drawing: Option<Drawing>,
     tracks: Tracks,
     trains: Collection<Train>,
-    resources: HashMap<String, Id>,
+    resources: Collection<Resource>,
     factories: Collection<Factory>,
 
     control: Control,
@@ -271,36 +318,63 @@ impl Game {
                 .io
                 .iter()
                 .enumerate()
-                .map(|(index, io)| FactoryIo {
-                    ty: io.r#type,
-                    resource: *self
-                        .resources
-                        .entry(io.resource.clone())
-                        .or_insert_with(|| self.id_gen.gen()),
-                    pos: pos
+                .map(|(index, io)| {
+                    let io_pos = pos
                         + vec2(factory_type.radius, 0.0).rotate(
                             angle
                                 + Angle::from_degrees(
                                     360.0 * index as f32 / factory_type.io.len() as f32,
                                 ),
-                        ),
+                        );
+                    let node = TrackNode::new(&mut self.id_gen, io_pos);
+                    let node_id = node.id;
+                    self.tracks.nodes.insert(node);
+                    FactoryIo {
+                        ty: io.r#type,
+                        node: node_id,
+                        amount: io.speed.is_some().then_some(0.0),
+                        resource: {
+                            let existing = self
+                                .resources
+                                .iter()
+                                .find(|resource| resource.name == io.resource);
+                            if let Some(existing) = existing {
+                                existing.id
+                            } else {
+                                let id = self.id_gen.gen();
+                                self.resources.insert(Resource {
+                                    id,
+                                    name: io.resource.clone(),
+                                });
+                                id
+                            }
+                        },
+                        pos: io_pos,
+                    }
                 })
                 .collect(),
         };
         self.factories.insert(factory);
     }
     fn spawn_train(&mut self) {
+        let Some(resource) = self.resources.iter().choose(&mut thread_rng()) else {
+            return;
+        };
         if let Some(node) = self.tracks.nodes.iter().choose(&mut thread_rng()) {
             let id = self.id_gen.gen();
             let train = Train {
+                target: None,
                 id,
                 length: self.config.test.train_length,
+                resource: resource.id,
+                amount: 0.0,
                 head: TrackPoint {
                     from: node.id,
                     to: node.id,
                     ratio: 0.0,
                 },
                 tail_nodes: default(),
+                path_from_target: None,
             };
             self.trains.insert(train);
         }
@@ -323,7 +397,108 @@ impl geng::State for Game {
             }
         }
 
+        for factory in &mut self.factories {
+            let factory_type = &self.factory_types[factory.ty];
+            let mut max_input_dt = delta_time;
+            for (io, io_config) in factory.io.iter().zip(&factory_type.io) {
+                if io.ty == IoType::Input {
+                    if let (Some(amount), Some(speed)) = (io.amount, io_config.speed) {
+                        max_input_dt = max_input_dt.min(amount / speed);
+                    }
+                }
+            }
+            for (io, io_config) in factory.io.iter_mut().zip(&factory_type.io) {
+                match io.ty {
+                    IoType::Input => {
+                        if let (Some(amount), Some(speed)) = (&mut io.amount, io_config.speed) {
+                            *amount = (*amount - speed * max_input_dt).max(0.0);
+                        }
+                    }
+                    IoType::Output => {
+                        if let (Some(amount), Some(speed)) = (&mut io.amount, io_config.speed) {
+                            *amount += speed * max_input_dt;
+                        }
+                    }
+                }
+            }
+        }
+
         for train in &mut self.trains {
+            if train.path_from_target.is_some() {
+                continue;
+            }
+            let mut go = false;
+            if let Some(io) = train.target {
+                let io = &mut self.factories.get_mut(&io.factory).unwrap().io[io.io];
+                match io.ty {
+                    IoType::Input => {
+                        let unload_amount = train
+                            .amount
+                            .min(self.config.test.train_load_speed * delta_time);
+                        train.amount -= unload_amount;
+                        if let Some(io_amount) = &mut io.amount {
+                            *io_amount += unload_amount;
+                        }
+                        if train.amount.approx_eq(&0.0) {
+                            go = true;
+                        }
+                    }
+                    IoType::Output => {
+                        let mut load_amount = (self.config.train.capacity - train.amount)
+                            .min(self.config.test.train_load_speed * delta_time);
+                        if let Some(io_amount) = io.amount {
+                            load_amount = load_amount.min(io_amount);
+                        }
+                        train.amount += load_amount;
+                        if let Some(io_amount) = &mut io.amount {
+                            *io_amount -= load_amount;
+                        }
+                        if self.config.train.capacity.approx_eq(&train.amount) {
+                            go = true;
+                        }
+                    }
+                }
+            } else {
+                go = true;
+            }
+
+            if go {
+                let look_for = if train.amount > self.config.train.capacity / 2.0 {
+                    IoType::Input
+                } else {
+                    IoType::Output
+                };
+                let target = self
+                    .factories
+                    .iter()
+                    .flat_map(|factory| {
+                        factory
+                            .io
+                            .iter()
+                            .enumerate()
+                            .map(|(index, io)| (factory.id, index, io))
+                    })
+                    .filter(|(_, _, io)| io.ty == look_for && io.resource == train.resource)
+                    .choose(&mut thread_rng());
+                if let Some((factory_id, io_index, io)) = target {
+                    train.path_from_target = self.tracks.pathfind(io.node, train.head.to);
+                    if train.path_from_target.is_some() {
+                        train.target = Some(IoId {
+                            factory: factory_id,
+                            io: io_index,
+                        })
+                    }
+                }
+            }
+        }
+
+        for train in &mut self.trains {
+            let Some(path) = &mut train.path_from_target else {
+                continue;
+            };
+            while path.last() == Some(&train.head.to) {
+                path.pop();
+            }
             let from = self.tracks.nodes.get(&train.head.from).unwrap();
             let to = self.tracks.nodes.get(&train.head.to).unwrap();
             let current_segment_length = self.tracks.segment_length(from.id, to.id);
@@ -331,14 +506,8 @@ impl geng::State for Game {
             current_segment_progress += self.config.test.train_speed * delta_time;
             if current_segment_progress < current_segment_length {
                 train.head.ratio = current_segment_progress / current_segment_length;
-            } else {
-                let next_node = to
-                    .connections
-                    .iter()
-                    .filter(|&&node| node != from.id)
-                    .choose(&mut thread_rng())
-                    .expect("no connections???");
-                let next_node = self.tracks.nodes.get(next_node).unwrap();
+            } else if let Some(next_node) = path.pop() {
+                let next_node = self.tracks.nodes.get(&next_node).unwrap();
                 let next_segment_length = self.tracks.segment_length(to.id, next_node.id);
                 let next_segment_progress = current_segment_progress - current_segment_length;
                 train.head = TrackPoint {
@@ -356,6 +525,9 @@ impl geng::State for Game {
                     }
                     covered_length += self.tracks.segment_length(a, b);
                 }
+            } else {
+                train.head.ratio = 1.0;
+                train.path_from_target = None;
             }
         }
     }
@@ -366,19 +538,19 @@ impl geng::State for Game {
                     self.spawn_train();
                 }
                 geng::Key::Digit0 => {
-                    self.spawn_factory(self.cursor_world_position, Angle::ZERO, 0);
+                    self.spawn_factory(self.cursor_world_position, thread_rng().gen(), 0);
                 }
                 geng::Key::Digit1 => {
-                    self.spawn_factory(self.cursor_world_position, Angle::ZERO, 1);
+                    self.spawn_factory(self.cursor_world_position, thread_rng().gen(), 1);
                 }
                 geng::Key::Digit2 => {
-                    self.spawn_factory(self.cursor_world_position, Angle::ZERO, 2);
+                    self.spawn_factory(self.cursor_world_position, thread_rng().gen(), 2);
                 }
                 geng::Key::Digit3 => {
-                    self.spawn_factory(self.cursor_world_position, Angle::ZERO, 3);
+                    self.spawn_factory(self.cursor_world_position, thread_rng().gen(), 3);
                 }
                 geng::Key::Digit4 => {
-                    self.spawn_factory(self.cursor_world_position, Angle::ZERO, 4);
+                    self.spawn_factory(self.cursor_world_position, thread_rng().gen(), 4);
                 }
                 _ => {}
             },
@@ -406,7 +578,7 @@ impl geng::State for Game {
                         Hover::Nothing { pos } => {
                             self.drawing = Some(Drawing::FromScratch { start: pos })
                         }
-                        Hover::Node { id } => {
+                        Hover::TrackNode { id } => {
                             self.drawing = Some(Drawing::FromNode { id });
                         }
                     },
@@ -427,7 +599,7 @@ impl geng::State for Game {
                                 self.tracks.nodes.insert(node);
                                 id
                             }
-                            Hover::Node { id } => id,
+                            Hover::TrackNode { id } => id,
                         };
                         self.tracks.add_connection(start, end);
                         self.drawing = Some(Drawing::FromNode { id: end });
@@ -491,7 +663,7 @@ impl geng::State for Game {
                             / self.framebuffer_size.y
                             < self.config.control.snap_distance
                         {
-                            self.hover = Hover::Node {
+                            self.hover = Hover::TrackNode {
                                 id: closest_node.id,
                             };
                         }
@@ -522,6 +694,42 @@ impl geng::State for Game {
                 )
                 .fit_into(Ellipse::circle(factory.pos, factory_type.radius)),
             );
+
+            for io in &factory.io {
+                let resource = self.resources.get(&io.resource).unwrap();
+                self.geng.draw2d().draw2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw2d::Ellipse::circle(
+                        io.pos,
+                        self.config.station.radius,
+                        self.config.station.color,
+                    ),
+                );
+                self.geng.draw2d().draw2d(
+                    framebuffer,
+                    &self.camera,
+                    &draw2d::Text::unit(
+                        &**self.geng.default_font(),
+                        &resource.name,
+                        self.config.test.text_color,
+                    )
+                    .align_bounding_box(vec2(0.5, 0.0))
+                    .transform(
+                        mat3::translate(io.pos) * mat3::scale_uniform(self.config.test.text_size),
+                    ),
+                );
+                if let Some(amount) = io.amount {
+                    self.geng.default_font().draw(
+                        framebuffer,
+                        &self.camera,
+                        &format!("{amount:.1}"),
+                        vec2(geng::TextAlign::CENTER, geng::TextAlign::BOTTOM),
+                        mat3::translate(io.pos) * mat3::scale_uniform(self.config.test.amount_size),
+                        self.config.test.amount_color,
+                    );
+                }
+            }
         }
 
         for a in &self.tracks.nodes {
@@ -579,6 +787,15 @@ impl geng::State for Game {
                     ratio: (covered_length - train.length).max(0.0) / segment_length,
                 }));
             }
+            self.geng.default_font().draw(
+                framebuffer,
+                &self.camera,
+                &format!("{:.1}", train.amount),
+                vec2(geng::TextAlign::CENTER, geng::TextAlign::BOTTOM),
+                mat3::translate(self.tracks.point_pos(train.head))
+                    * mat3::scale_uniform(self.config.test.amount_size),
+                self.config.test.amount_color,
+            );
         }
 
         // preview
@@ -589,7 +806,7 @@ impl geng::State for Game {
             };
             let end = match self.hover {
                 Hover::Nothing { pos } => pos,
-                Hover::Node { id } => self.tracks.nodes.get(&id).unwrap().pos,
+                Hover::TrackNode { id } => self.tracks.nodes.get(&id).unwrap().pos,
             };
             self.geng.draw2d().draw2d(
                 framebuffer,
@@ -603,7 +820,7 @@ impl geng::State for Game {
         }
         match self.hover {
             Hover::Nothing { .. } => {}
-            Hover::Node { id } => self.geng.draw2d().draw2d(
+            Hover::TrackNode { id } => self.geng.draw2d().draw2d(
                 framebuffer,
                 &self.camera,
                 &draw2d::Ellipse::circle(
