@@ -9,6 +9,10 @@ max = 100
 width = 1
 color = "#aaa"
 
+[train]
+width = 1.5
+color = "#77f"
+
 [drawing]
 preview_color = "#aaa7"
 
@@ -18,3 +22,11 @@ min_drag_distance = 5
 zoom_speed = 1.01
 drag_timer = 0.5
 snap_distance = 10
+
+[test]
+train_length = 10
+train_speed = 10
+train_load_speed = 10
+text_color = "#aa7"
+
+[factory]

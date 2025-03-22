@@ -1,0 +1,21 @@
+[[factory]]
+name = "Iron Ore"
+color = "#77a"
+radius = 5
+    [[factory.io]]
+    type = "Output"
+    resource = "Iron Ore"
+
+[[factory]]
+name = "Smelting Iron Ore"
+color = "#a77"
+radius = 5
+    [[factory.io]]
+    type = "Input"
+    resource = "Iron Ore"
+    speed = 10
+    [[factory.io]]
+    type = "Output"
+    resource = "Iron Plate"
+    speed = 1
+
