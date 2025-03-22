@@ -16,3 +16,4 @@ preview_color = "#aaa7"
 target_window_height = 100
 min_drag_distance = 5
 zoom_speed = 1.01
+drag_timer = 0.5

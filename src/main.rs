@@ -10,6 +10,7 @@ struct ControlConfig {
     target_window_height: f32,
     min_drag_distance: f32,
     zoom_speed: f32,
+    drag_timer: f64,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +100,21 @@ impl Game {
 }
 
 impl geng::State for Game {
+    fn update(&mut self, delta_time: f64) {
+        let delta_time = delta_time as f32;
+        if let Control::Detecting {
+            start_world_pos,
+            ref timer,
+            ..
+        } = self.control
+        {
+            if timer.elapsed().as_secs_f64() > self.config.control.drag_timer {
+                self.control = Control::MovingCamera {
+                    prev_pos: start_world_pos,
+                };
+            }
+        }
+    }
     fn handle_event(&mut self, event: geng::Event) {
         match event {
             geng::Event::MousePress {
