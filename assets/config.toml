@@ -1,5 +1,9 @@
 background = "#222"
-fov = 20
+
+[fov]
+default = 20
+min = 10
+max = 100
 
 [track]
 width = 1
@@ -11,3 +15,4 @@ preview_color = "#aaa7"
 [control]
 target_window_height = 100
 min_drag_distance = 5
+zoom_speed = 1.01

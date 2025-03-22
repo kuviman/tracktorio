@@ -9,6 +9,7 @@ struct DrawingConfig {
 struct ControlConfig {
     target_window_height: f32,
     min_drag_distance: f32,
+    zoom_speed: f32,
 }
 
 #[derive(Deserialize)]
@@ -18,9 +19,16 @@ struct TrackConfig {
 }
 
 #[derive(Deserialize)]
+struct FovConfig {
+    default: f32,
+    min: f32,
+    max: f32,
+}
+
+#[derive(Deserialize)]
 struct Config {
     background: Rgba<f32>,
-    fov: f32,
+    fov: FovConfig,
     track: TrackConfig,
     drawing: DrawingConfig,
     control: ControlConfig,
@@ -78,7 +86,7 @@ impl Game {
             camera: Camera2d {
                 center: vec2::ZERO,
                 rotation: Angle::ZERO,
-                fov: Camera2dFov::MinSide(config.fov),
+                fov: Camera2dFov::MinSide(config.fov.default),
             },
             config,
             drawing: None,
@@ -129,6 +137,11 @@ impl geng::State for Game {
                     },
                 },
             },
+            geng::Event::Wheel { delta } => {
+                let fov = self.camera.fov.value_mut();
+                *fov = (*fov * self.config.control.zoom_speed.powf(-delta as f32))
+                    .clamp(self.config.fov.min, self.config.fov.max);
+            }
             geng::Event::MousePress {
                 button: geng::MouseButton::Right,
             } => {
