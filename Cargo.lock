@@ -4942,6 +4942,7 @@ name = "tracktorio"
 version = "0.1.0"
 dependencies = [
  "geng",
+ "serde",
 ]
 
 [[package]]
