@@ -323,6 +323,18 @@ impl geng::State for Game {
                 ),
             );
         }
+        match self.hover {
+            Hover::Nothing { .. } => {}
+            Hover::Node { id } => self.geng.draw2d().draw2d(
+                framebuffer,
+                &self.camera,
+                &draw2d::Ellipse::circle(
+                    self.tracks.nodes.get(&id).unwrap().pos,
+                    self.config.track.width,
+                    self.config.drawing.preview_color,
+                ),
+            ),
+        }
     }
 }
 
